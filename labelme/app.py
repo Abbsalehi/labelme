@@ -1084,90 +1084,90 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_status_message(self, message, delay=500):
         self.statusBar().showMessage(message, delay)
 
-    # def _submit_ai_prompt(self, _) -> None:
-    #     texts = self._ai_prompt_widget.get_text_prompt().split(",")
-    #
-    #     model_name: str = "yoloworld"
-    #     model_type = osam.apis.get_model_type_by_name(model_name)
-    #     model_type = typing.cast(type[osam.types.Model], model_type)
-    #     if not (_is_already_downloaded := model_type.get_size() is not None):
-    #         if not download_ai_model(model_name=model_name, parent=self):
-    #             return
-    #
-    #     image_array = utils.img_qt_to_arr(self.image)[:, :, :3]
-    #     boxes, scores, labels = bbox_from_text.get_bboxes_from_texts(
-    #         model=model_name,
-    #         image=image_array,
-    #         texts=texts,
-    #     )
-    #
-    #     for shape in self.canvas.shapes:
-    #         if shape.shape_type != "rectangle" or shape.label not in texts:
-    #             continue
-    #         box = np.array(
-    #             [
-    #                 shape.points[0].x(),
-    #                 shape.points[0].y(),
-    #                 shape.points[1].x(),
-    #                 shape.points[1].y(),
-    #             ],
-    #             dtype=np.float32,
-    #         )
-    #         boxes = np.r_[boxes, [box]]
-    #         scores = np.r_[scores, [1.01]]
-    #         labels = np.r_[labels, [texts.index(shape.label)]]
-    #
-    #     boxes, scores, labels = bbox_from_text.nms_bboxes(
-    #         boxes=boxes,
-    #         scores=scores,
-    #         labels=labels,
-    #         iou_threshold=self._ai_prompt_widget.get_iou_threshold(),
-    #         score_threshold=self._ai_prompt_widget.get_score_threshold(),
-    #         max_num_detections=100,
-    #     )
-    #
-    #     keep = scores != 1.01
-    #     boxes = boxes[keep]
-    #     scores = scores[keep]
-    #     labels = labels[keep]
-    #
-    #     # Get output mode
-    #     output_mode = self._outputModeComboBox.currentData()
-    #
-    #     shapes: list[Shape] = []
-    #
-    #     # Add bounding boxes if requested
-    #     if output_mode in ["bbox", "both"]:
-    #         shape_dicts: list[dict] = bbox_from_text.get_shapes_from_bboxes(
-    #             boxes=boxes,
-    #             scores=scores,
-    #             labels=labels,
-    #             texts=texts,
-    #         )
-    #         for shape_dict in shape_dicts:
-    #             shape = Shape(
-    #                 label=shape_dict["label"],
-    #                 shape_type=shape_dict["shape_type"],
-    #                 description=shape_dict["description"],
-    #             )
-    #             for point in shape_dict["points"]:
-    #                 shape.addPoint(QtCore.QPointF(*point))
-    #             shapes.append(shape)
-    #
-    #     # Add segmentation masks if requested
-    #     if output_mode in ["segmentation", "both"]:
-    #         seg_shapes = self._get_segmentation_from_boxes(
-    #             image=image_array,
-    #             boxes=boxes,
-    #             scores=scores,
-    #             labels=labels,
-    #             texts=texts,
-    #         )
-    #         shapes.extend(seg_shapes)
-    #
-    #     self.canvas.storeShapes()
-    #     self._load_shapes(shapes, replace=False)
-    #     self.setDirty()
+    def _submit_ai_prompt(self, _) -> None:
+        texts = self._ai_prompt_widget.get_text_prompt().split(",")
+
+        model_name: str = "yoloworld"
+        model_type = osam.apis.get_model_type_by_name(model_name)
+        model_type = typing.cast(type[osam.types.Model], model_type)
+        if not (_is_already_downloaded := model_type.get_size() is not None):
+            if not download_ai_model(model_name=model_name, parent=self):
+                return
+
+        image_array = utils.img_qt_to_arr(self.image)[:, :, :3]
+        boxes, scores, labels = bbox_from_text.get_bboxes_from_texts(
+            model=model_name,
+            image=image_array,
+            texts=texts,
+        )
+
+        for shape in self.canvas.shapes:
+            if shape.shape_type != "rectangle" or shape.label not in texts:
+                continue
+            box = np.array(
+                [
+                    shape.points[0].x(),
+                    shape.points[0].y(),
+                    shape.points[1].x(),
+                    shape.points[1].y(),
+                ],
+                dtype=np.float32,
+            )
+            boxes = np.r_[boxes, [box]]
+            scores = np.r_[scores, [1.01]]
+            labels = np.r_[labels, [texts.index(shape.label)]]
+
+        boxes, scores, labels = bbox_from_text.nms_bboxes(
+            boxes=boxes,
+            scores=scores,
+            labels=labels,
+            iou_threshold=self._ai_prompt_widget.get_iou_threshold(),
+            score_threshold=self._ai_prompt_widget.get_score_threshold(),
+            max_num_detections=100,
+        )
+
+        keep = scores != 1.01
+        boxes = boxes[keep]
+        scores = scores[keep]
+        labels = labels[keep]
+
+        # Get output mode
+        output_mode = self._outputModeComboBox.currentData()
+
+        shapes: list[Shape] = []
+
+        # Add bounding boxes if requested
+        if output_mode in ["bbox", "both"]:
+            shape_dicts: list[dict] = bbox_from_text.get_shapes_from_bboxes(
+                boxes=boxes,
+                scores=scores,
+                labels=labels,
+                texts=texts,
+            )
+            for shape_dict in shape_dicts:
+                shape = Shape(
+                    label=shape_dict["label"],
+                    shape_type=shape_dict["shape_type"],
+                    description=shape_dict["description"],
+                )
+                for point in shape_dict["points"]:
+                    shape.addPoint(QtCore.QPointF(*point))
+                shapes.append(shape)
+
+        # Add segmentation masks if requested
+        if output_mode in ["segmentation", "both"]:
+            seg_shapes = self._get_segmentation_from_boxes(
+                image=image_array,
+                boxes=boxes,
+                scores=scores,
+                labels=labels,
+                texts=texts,
+            )
+            shapes.extend(seg_shapes)
+
+        self.canvas.storeShapes()
+        self._load_shapes(shapes, replace=False)
+        self.setDirty()
 
     def _get_segmentation_from_boxes(
             self,
