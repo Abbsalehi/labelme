@@ -71,7 +71,7 @@ If you want to use a custom or development version of OSAM (for example, a fork)
 install it explicitly from GitHub before installing labelme.
 
 ```bash
-pip install -e git+https://github.com/Abbsalehi/osam.git
+pip install git+https://github.com/Abbsalehi/osam.git
 ```
 
 ### Option 2: Using standalone executable (Easiest)
