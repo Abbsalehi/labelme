@@ -64,7 +64,7 @@ For more detail, check ["Install Labelme using Terminal"](https://www.labelme.io
 # To install the latest version:
  pip install git+https://github.com/Abbsalehi/labelme.git
 ```
-### Using OSAM from GitHub (for development)
+### Using OSAM from GitHub
 
 Labelme optionally integrates with **OSAM** for advanced segmentation workflows.
 If you want to use a custom or development version of OSAM (for example, a fork),
@@ -72,7 +72,7 @@ install it explicitly from GitHub before installing labelme.
 
 ```bash
 pip install -e git+https://github.com/Abbsalehi/osam.git
-
+```
 
 ### Option 2: Using standalone executable (Easiest)
 
