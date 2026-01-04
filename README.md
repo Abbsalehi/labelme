@@ -78,16 +78,11 @@ pip install git+https://github.com/Abbsalehi/osam.git
 Labelme integrations that rely on ONNX Runtime (for example, OSAM-based models)
 can take advantage of GPU acceleration if a compatible execution provider is installed.
 
-On Windows, **DirectML** is recommended for most users.
-Advanced users may optionally enable **CUDA**.
-
-#### Option A (Recommended on Windows): DirectML
-
-DirectML works with NVIDIA, AMD, and Intel GPUs and does not require a CUDA toolkit.
+#### Option A (Recommended on Windows): 
 
 ```bash
 pip uninstall onnxruntime -y
-pip install onnxruntime-directml
+pip install onnxruntime-gpu
 ```
 ### Option 2: Using standalone executable (Easiest)
 
