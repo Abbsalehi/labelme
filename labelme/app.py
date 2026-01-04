@@ -870,12 +870,38 @@ class MainWindow(QtWidgets.QMainWindow):
         outputModeLabel.setAlignment(QtCore.Qt.AlignCenter)
         selectAiModel.defaultWidget().layout().addWidget(outputModeLabel)
 
+        # self._outputModeComboBox = QtWidgets.QComboBox()
+        # self._outputModeComboBox.addItem("Bounding Box", "bbox")
+        # self._outputModeComboBox.addItem("Segmentation", "segmentation")
+        # self._outputModeComboBox.addItem("Both", "both")
+        # self._outputModeComboBox.setCurrentIndex(0)
+        # selectAiModel.defaultWidget().layout().addWidget(self._outputModeComboBox)
+
+        # self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
+        #     on_submit=self._submit_ai_prompt, parent=self
+        # )
+
         self._outputModeComboBox = QtWidgets.QComboBox()
         self._outputModeComboBox.addItem("Bounding Box", "bbox")
         self._outputModeComboBox.addItem("Segmentation", "segmentation")
         self._outputModeComboBox.addItem("Both", "both")
         self._outputModeComboBox.setCurrentIndex(0)
         selectAiModel.defaultWidget().layout().addWidget(self._outputModeComboBox)
+
+        # Add epsilon factor control for polygon simplification
+        epsilonLabel = QtWidgets.QLabel(self.tr("Polygon Simplification"))
+        epsilonLabel.setAlignment(QtCore.Qt.AlignCenter)
+        selectAiModel.defaultWidget().layout().addWidget(epsilonLabel)
+
+        self._epsilonSpinBox = QtWidgets.QDoubleSpinBox()
+        self._epsilonSpinBox.setMinimum(0.0001)
+        self._epsilonSpinBox.setMaximum(0.1)
+        self._epsilonSpinBox.setValue(0.001)
+        self._epsilonSpinBox.setSingleStep(0.001)
+        self._epsilonSpinBox.setDecimals(4)
+        self._epsilonSpinBox.setPrefix("ε: ")
+        self._epsilonSpinBox.setToolTip(self.tr("Lower values = more detailed polygons, Higher values = simpler polygons"))
+        selectAiModel.defaultWidget().layout().addWidget(self._epsilonSpinBox)
 
         self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
             on_submit=self._submit_ai_prompt, parent=self
@@ -1386,6 +1412,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return [x_min, y_min, width, height]
 
+    # def _mask_to_polygons(
+    #         self,
+    #         mask: np.ndarray
+    # ) -> list[np.ndarray]:
+    #     """Convert binary mask to polygon contours (only largest contour)."""
+
+    #     # Find contours
+    #     contours, _ = cv2.findContours(
+    #         mask.astype(np.uint8),
+    #         cv2.RETR_EXTERNAL,
+    #         cv2.CHAIN_APPROX_SIMPLE
+    #     )
+
+    #     if not contours:
+    #         return []
+
+    #     # Find the largest contour by area
+    #     max_contour = max(contours, key=cv2.contourArea)
+
+    #     # # Simplify contour
+    #     epsilon_factor: float = 0.001
+    #     epsilon = epsilon_factor * cv2.arcLength(max_contour, True)
+    #     approx = cv2.approxPolyDP(max_contour, epsilon, True)
+
+    #     # # Reshape to (N, 2)
+    #     polygon = approx.reshape(-1, 2)
+    #     # Reshape to (N, 2)
+    #     # polygon = max_contour.reshape(-1, 2)
+
+    #     # Only return if polygon has at least 3 points
+    #     if len(polygon) >= 3:
+    #         return [polygon]
+
+    #     return []
+
     def _mask_to_polygons(
             self,
             mask: np.ndarray
@@ -1405,15 +1466,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Find the largest contour by area
         max_contour = max(contours, key=cv2.contourArea)
 
-        # # Simplify contour
-        epsilon_factor: float = 0.001
+        # Get epsilon_factor from spinbox
+        epsilon_factor: float = self._epsilonSpinBox.value()
         epsilon = epsilon_factor * cv2.arcLength(max_contour, True)
         approx = cv2.approxPolyDP(max_contour, epsilon, True)
 
-        # # Reshape to (N, 2)
-        polygon = approx.reshape(-1, 2)
         # Reshape to (N, 2)
-        # polygon = max_contour.reshape(-1, 2)
+        polygon = approx.reshape(-1, 2)
 
         # Only return if polygon has at least 3 points
         if len(polygon) >= 3:
@@ -2576,3 +2635,4 @@ def _scan_image_files(root_dir: str) -> list[str]:
 
     logger.debug("found {:d} images in {!r}", len(images), root_dir)
     return natsort.os_sorted(images)
+
