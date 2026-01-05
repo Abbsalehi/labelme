@@ -47,6 +47,8 @@ from labelme.widgets import download_ai_model
 from . import utils
 from pathlib import Path
 import torch 
+import urllib.request
+
 import threading
 from segment_anything import sam_model_registry, SamPredictor
 
@@ -84,8 +86,7 @@ def download_sam_checkpoint(model_type: str = "vit_h", cache_dir: str | None = N
     Returns:
         Path to the downloaded checkpoint
     """
-    import urllib.request
-    from pathlib import Path
+
 
     # SAM checkpoint URLs from official repository
     SAM_URLS = {
