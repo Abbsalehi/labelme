@@ -15,7 +15,7 @@ import cv2
 import imgviz
 import natsort
 import numpy as np
-#import osam
+import osam
 from loguru import logger
 from numpy.typing import NDArray
 from PyQt5 import QtCore
@@ -45,8 +45,11 @@ from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.widgets import download_ai_model
 from . import utils
-
+from pathlib import Path
+import torch 
+import threading
 from segment_anything import sam_model_registry, SamPredictor
+
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
 
@@ -60,7 +63,6 @@ if hasattr(QtCore.Qt, "AA_EnableHighDpiScaling"):
 if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
-
 LABEL_COLORMAP: NDArray[np.uint8] = imgviz.label_colormap()
 
 
@@ -68,167 +70,123 @@ class _ZoomMode(enum.Enum):
     FIT_WINDOW = enum.auto()
     FIT_WIDTH = enum.auto()
     MANUAL_ZOOM = enum.auto()
+
+
 ##############################################################################
 def download_sam_checkpoint(model_type: str = "vit_h", cache_dir: str | None = None) -> str:
     """
     Download SAM checkpoint automatically if not present.
-    
+
     Args:
         model_type: One of "vit_h", "vit_l", "vit_b"
         cache_dir: Directory to save checkpoint. If None, uses ~/.cache/sam
-    
+
     Returns:
         Path to the downloaded checkpoint
     """
     import urllib.request
     from pathlib import Path
-    
+
     # SAM checkpoint URLs from official repository
     SAM_URLS = {
         "vit_h": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
         "vit_l": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
         "vit_b": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
     }
-    
+
     SAM_FILENAMES = {
         "vit_h": "sam_vit_h_4b8939.pth",
         "vit_l": "sam_vit_l_0b3195.pth",
         "vit_b": "sam_vit_b_01ec64.pth",
     }
-    
+
     if model_type not in SAM_URLS:
         raise ValueError(f"Invalid model_type: {model_type}. Must be one of {list(SAM_URLS.keys())}")
-    
+
     # Set cache directory
     if cache_dir is None:
         cache_dir = str(Path.home() / ".cache" / "sam")
-    
+
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    
+
     checkpoint_path = str(Path(cache_dir) / SAM_FILENAMES[model_type])
-    
+
     # Check if already downloaded
     if Path(checkpoint_path).exists():
         logger.info(f"SAM checkpoint already exists at {checkpoint_path}")
         return checkpoint_path
-    
+
     # Download with progress
     url = SAM_URLS[model_type]
     logger.info(f"Downloading SAM checkpoint from {url}...")
-    
+
     try:
         # Download to temporary file first
         temp_path = checkpoint_path + ".tmp"
-        
+
         def report_progress(block_num, block_size, total_size):
             downloaded = block_num * block_size
             percent = min(downloaded * 100.0 / total_size, 100.0)
             if block_num % 100 == 0:  # Log every 100 blocks
                 logger.info(f"Download progress: {percent:.1f}%")
-        
+
         urllib.request.urlretrieve(url, temp_path, reporthook=report_progress)
-        
+
         # Move to final location
         Path(temp_path).rename(checkpoint_path)
         logger.info(f"SAM checkpoint downloaded successfully to {checkpoint_path}")
-        
+
         return checkpoint_path
-        
+
     except Exception as e:
         # Clean up temporary file if it exists
         if Path(temp_path).exists():
             Path(temp_path).unlink()
         raise RuntimeError(f"Failed to download SAM checkpoint: {e}")
 
+
 class SAMDownloadDialog(QtWidgets.QDialog):
     """Dialog to show SAM model download progress."""
-    
+
     def __init__(self, model_type: str, parent=None):
         super().__init__(parent)
         self.model_type = model_type
         self.setWindowTitle(f"Downloading SAM Model ({model_type})")
         self.setModal(True)
         self.setMinimumWidth(400)
-        
+
         layout = QtWidgets.QVBoxLayout()
-        
         self.label = QtWidgets.QLabel(f"Downloading SAM {model_type} checkpoint...")
         layout.addWidget(self.label)
-        
+
         self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
+        self.progress_bar.setRange(0, 100)
         layout.addWidget(self.progress_bar)
-        
+
         self.status_label = QtWidgets.QLabel("")
         layout.addWidget(self.status_label)
-        
         self.setLayout(layout)
-        
+
         self.checkpoint_path = None
         self.error = None
-    
+
     def download_in_thread(self, cache_dir: str | None = None):
         """Start download in a separate thread."""
-        import threading
-        
+
         def download():
             try:
-                import urllib.request
-                from pathlib import Path
-                
-                SAM_URLS = {
-                    "vit_h": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
-                    "vit_l": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
-                    "vit_b": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
-                }
-                
-                SAM_FILENAMES = {
-                    "vit_h": "sam_vit_h_4b8939.pth",
-                    "vit_l": "sam_vit_l_0b3195.pth",
-                    "vit_b": "sam_vit_b_01ec64.pth",
-                }
-                
-                if cache_dir is None:
-                    cache_dir = str(Path.home() / ".cache" / "sam")
-                
-                Path(cache_dir).mkdir(parents=True, exist_ok=True)
-                checkpoint_path = str(Path(cache_dir) / SAM_FILENAMES[self.model_type])
-                
-                # Check if already exists
-                if Path(checkpoint_path).exists():
-                    self.checkpoint_path = checkpoint_path
-                    QtCore.QTimer.singleShot(0, lambda: self.accept())
-                    return
-                
-                url = SAM_URLS[self.model_type]
-                temp_path = checkpoint_path + ".tmp"
-                
-                def report_progress(block_num, block_size, total_size):
-                    downloaded = block_num * block_size
-                    percent = min(downloaded * 100.0 / total_size, 100.0)
-                    mb_downloaded = downloaded / (1024 * 1024)
-                    mb_total = total_size / (1024 * 1024)
-                    
-                    QtCore.QTimer.singleShot(0, lambda: self.progress_bar.setValue(int(percent)))
-                    QtCore.QTimer.singleShot(0, lambda: self.status_label.setText(
-                        f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB"
-                    ))
-                
-                urllib.request.urlretrieve(url, temp_path, reporthook=report_progress)
-                Path(temp_path).rename(checkpoint_path)
-                
+                # Simply call the download_sam_checkpoint function
+                checkpoint_path = download_sam_checkpoint(self.model_type, cache_dir)
                 self.checkpoint_path = checkpoint_path
-                QtCore.QTimer.singleShot(0, lambda: self.accept())
-                
+                QtCore.QTimer.singleShot(0, self.accept)
             except Exception as e:
                 self.error = str(e)
-                if 'temp_path' in locals() and Path(temp_path).exists():
-                    Path(temp_path).unlink()
-                QtCore.QTimer.singleShot(0, lambda: self.reject())
-        
+                QtCore.QTimer.singleShot(0, self.reject)
+
         thread = threading.Thread(target=download, daemon=True)
         thread.start()
+
+
 ##############################################################################
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -248,12 +206,12 @@ class MainWindow(QtWidgets.QMainWindow):
     actions: types.SimpleNamespace  # type: ignore[assignment]
 
     def __init__(
-        self,
-        config: dict | None = None,
-        filename: str | None = None,
-        output: str | None = None,
-        output_file: str | None = None,
-        output_dir: str | None = None,
+            self,
+            config: dict | None = None,
+            filename: str | None = None,
+            output: str | None = None,
+            output_file: str | None = None,
+            output_dir: str | None = None,
     ) -> None:
         if output is not None:
             logger.warning("argument output is deprecated, use output_file instead")
@@ -1029,32 +987,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # Initialize SAM predictor
         SAM_MODEL_TYPE = "vit_h"  # Options: "vit_h" (best), "vit_l" (medium), "vit_b" (fast)
         SAM_CACHE_DIR = None  # None = use default (~/.cache/sam), or specify custom path
-        
+
         self.sam_predictor = None
-        
+
         try:
             # Determine checkpoint path
             if SAM_CACHE_DIR is None:
                 cache_dir = str(Path.home() / ".cache" / "sam")
             else:
                 cache_dir = SAM_CACHE_DIR
-            
+
             SAM_FILENAMES = {
                 "vit_h": "sam_vit_h_4b8939.pth",
                 "vit_l": "sam_vit_l_0b3195.pth",
                 "vit_b": "sam_vit_b_01ec64.pth",
             }
-            
+
             checkpoint_path = str(Path(cache_dir) / SAM_FILENAMES[SAM_MODEL_TYPE])
-            
+
             # Check if checkpoint exists, if not download it
             if not Path(checkpoint_path).exists():
                 logger.info(f"SAM checkpoint not found, downloading {SAM_MODEL_TYPE}...")
-                
+
                 # Show download dialog
                 download_dialog = SAMDownloadDialog(SAM_MODEL_TYPE, parent=self)
                 download_dialog.download_in_thread(cache_dir)
-                
+
                 if download_dialog.exec_() == QtWidgets.QDialog.Accepted:
                     checkpoint_path = download_dialog.checkpoint_path
                     logger.info(f"SAM checkpoint downloaded to {checkpoint_path}")
@@ -1070,20 +1028,20 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"and place it in: {cache_dir}"
                     )
                     checkpoint_path = None
-            
+
             # Load SAM model
             if checkpoint_path and Path(checkpoint_path).exists():
                 logger.info(f"Loading SAM model from {checkpoint_path}...")
                 sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=checkpoint_path)
-                
+
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 sam.to(device=device)
-                
+
                 self.sam_predictor = SamPredictor(sam)
                 logger.info(f"SAM model loaded successfully on {device}")
             else:
                 logger.warning("SAM model not available")
-                
+
         except Exception as e:
             logger.error(f"Failed to initialize SAM model: {e}")
             self.sam_predictor = None
@@ -1099,16 +1057,6 @@ class MainWindow(QtWidgets.QMainWindow):
         outputModeLabel.setAlignment(QtCore.Qt.AlignCenter)
         selectAiModel.defaultWidget().layout().addWidget(outputModeLabel)
 
-        # self._outputModeComboBox = QtWidgets.QComboBox()
-        # self._outputModeComboBox.addItem("Bounding Box", "bbox")
-        # self._outputModeComboBox.addItem("Segmentation", "segmentation")
-        # self._outputModeComboBox.addItem("Both", "both")
-        # self._outputModeComboBox.setCurrentIndex(0)
-        # selectAiModel.defaultWidget().layout().addWidget(self._outputModeComboBox)
-
-        # self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
-        #     on_submit=self._submit_ai_prompt, parent=self
-        # )
         self._outputModeComboBox = QtWidgets.QComboBox()
         self._outputModeComboBox.addItem("Bounding Box", "bbox")
         self._outputModeComboBox.addItem("Segmentation", "segmentation")
@@ -1143,24 +1091,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Connect slider to update label
         self._epsilonSlider.valueChanged.connect(
-            lambda value: self._epsilonValueLabel.setText(f"{value/1000:.3f}")
+            lambda value: self._epsilonValueLabel.setText(f"{value / 1000:.3f}")
         )
 
         self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
             on_submit=self._submit_ai_prompt, parent=self
         )
 
-        # self._selectAiModelComboBox.currentIndexChanged.connect(
-        #     lambda index: self.canvas.set_ai_model_name(
-        #         model_name=self._selectAiModelComboBox.itemData(index)
-        #     )
-        # )
-        # self._selectAiModelComboBox.setCurrentIndex(model_index)
-        #
-        # self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
-        #     on_submit=self._submit_ai_prompt, parent=self
-        # )
-        #
         #############################################################################
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_prompt_widget)
@@ -1440,7 +1377,7 @@ class MainWindow(QtWidgets.QMainWindow):
             texts: list[str],
     ) -> list[Shape]:
         """Generate segmentation masks for detected bounding boxes using SAM with refinement."""
-        
+
         if self.sam_predictor is None:
             logger.warning("SAM predictor not initialized")
             return []
@@ -1457,14 +1394,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.sam_predictor is None:
             logger.warning("SAM predictor not initialized")
             return None
-        
+
         try:
             # Set the image
             self.sam_predictor.set_image(image)
-            
+
             # Convert box from [x1, y1, x2, y2] format to numpy array
             input_box = np.array(box, dtype=np.int64)
-            
+
             # Run SAM prediction
             masks, scores, logits = self.sam_predictor.predict(
                 point_coords=None,
@@ -1472,13 +1409,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 box=input_box[None, :],
                 multimask_output=False
             )
-            
+
             if masks is None or len(masks) == 0:
                 return None
-            
+
             # Return the first (best) mask
             return masks[0]
-            
+
         except Exception as e:
             logger.warning(f"Error in SAM prediction: {e}")
             return None
@@ -1636,7 +1573,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return []
 
-
     ###################################################################################################################
     def resetState(self):
         self.labelList.clear()
@@ -1683,7 +1619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.delete.setEnabled(not drawing)
 
     def _switch_canvas_mode(
-        self, edit: bool = True, createMode: str | None = None
+            self, edit: bool = True, createMode: str | None = None
     ) -> None:
         self.canvas.setEditing(edit)
         if createMode is not None:
@@ -1899,22 +1835,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 else self.uniqLabelList.count()
             )
             label_id: int = (
-                1  # skip black color by default
-                + item_index
-                + self._config["shift_auto_shape_color"]
+                    1  # skip black color by default
+                    + item_index
+                    + self._config["shift_auto_shape_color"]
             )
             rgb: tuple[int, int, int] = tuple(
                 LABEL_COLORMAP[label_id % len(LABEL_COLORMAP)].tolist()
             )
             return rgb
         elif (
-            self._config["shape_color"] == "manual"
-            and self._config["label_colors"]
-            and label in self._config["label_colors"]
+                self._config["shape_color"] == "manual"
+                and self._config["label_colors"]
+                and label in self._config["label_colors"]
         ):
             if not (
-                len(self._config["label_colors"][label]) == 3
-                and all(0 <= c <= 255 for c in self._config["label_colors"][label])
+                    len(self._config["label_colors"][label]) == 3
+                    and all(0 <= c <= 255 for c in self._config["label_colors"][label])
             ):
                 raise ValueError(
                     "Color for label must be 0-255 RGB tuple, but got: "
@@ -2238,7 +2174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Load the specified file, or the last opened file if None."""
         # changing fileListWidget loads file
         if filename in self.imageList and (
-            self.fileListWidget.currentRow() != self.imageList.index(filename)
+                self.fileListWidget.currentRow() != self.imageList.index(filename)
         ):
             self.fileListWidget.setCurrentRow(self.imageList.index(filename))
             self.fileListWidget.repaint()
@@ -2247,8 +2183,8 @@ class MainWindow(QtWidgets.QMainWindow):
         prev_shapes: list[Shape] = (
             self.canvas.shapes
             if self._config["keep_prev"]
-            or QtWidgets.QApplication.keyboardModifiers()
-            == (Qt.ControlModifier | Qt.ShiftModifier)
+               or QtWidgets.QApplication.keyboardModifiers()
+               == (Qt.ControlModifier | Qt.ShiftModifier)
             else []
         )
         self.resetState()
@@ -2351,9 +2287,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, a0: QtGui.QResizeEvent) -> None:
         if (
-            self.canvas
-            and not self.image.isNull()
-            and self._zoom_mode != _ZoomMode.MANUAL_ZOOM
+                self.canvas
+                and not self.image.isNull()
+                and self._zoom_mode != _ZoomMode.MANUAL_ZOOM
         ):
             self._adjust_scale()
         super().resizeEvent(a0)
@@ -2660,7 +2596,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "You are about to permanently delete {} polygons, proceed anyway?"
         ).format(len(self.canvas.selectedShapes))
         if yes == QtWidgets.QMessageBox.warning(
-            self, self.tr("Attention"), msg, yes | no, yes
+                self, self.tr("Attention"), msg, yes | no, yes
         ):
             self.remLabels(self.canvas.deleteSelected())
             self.setDirty()
@@ -2739,7 +2675,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_next_image()
 
     def _import_images_from_dir(
-        self, root_dir: str | None, pattern: str | None = None
+            self, root_dir: str | None, pattern: str | None = None
     ) -> None:
         self.actions.openNextImg.setEnabled(True)
         self.actions.openPrevImg.setEnabled(True)
@@ -2792,6 +2728,3 @@ def _scan_image_files(root_dir: str) -> list[str]:
 
     logger.debug("found {:d} images in {!r}", len(images), root_dir)
     return natsort.os_sorted(images)
-
-
-
