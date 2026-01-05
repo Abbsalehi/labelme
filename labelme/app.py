@@ -880,7 +880,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
         #     on_submit=self._submit_ai_prompt, parent=self
         # )
-
         self._outputModeComboBox = QtWidgets.QComboBox()
         self._outputModeComboBox.addItem("Bounding Box", "bbox")
         self._outputModeComboBox.addItem("Segmentation", "segmentation")
@@ -893,15 +892,30 @@ class MainWindow(QtWidgets.QMainWindow):
         epsilonLabel.setAlignment(QtCore.Qt.AlignCenter)
         selectAiModel.defaultWidget().layout().addWidget(epsilonLabel)
 
-        self._epsilonSpinBox = QtWidgets.QDoubleSpinBox()
-        self._epsilonSpinBox.setMinimum(0.0001)
-        self._epsilonSpinBox.setMaximum(0.1)
-        self._epsilonSpinBox.setValue(0.001)
-        self._epsilonSpinBox.setSingleStep(0.001)
-        self._epsilonSpinBox.setDecimals(4)
-        self._epsilonSpinBox.setPrefix("ε: ")
-        self._epsilonSpinBox.setToolTip(self.tr("Lower values = more detailed polygons, Higher values = simpler polygons"))
-        selectAiModel.defaultWidget().layout().addWidget(self._epsilonSpinBox)
+        # Create horizontal layout for slider and value display
+        epsilonLayout = QtWidgets.QHBoxLayout()
+
+        self._epsilonSlider = QtWidgets.QSlider(Qt.Horizontal)
+        self._epsilonSlider.setMinimum(1)  # 0.001
+        self._epsilonSlider.setMaximum(100)  # 0.1
+        self._epsilonSlider.setValue(10)  # 0.01 default
+        self._epsilonSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self._epsilonSlider.setTickInterval(10)
+
+        self._epsilonValueLabel = QtWidgets.QLabel("0.010")
+        self._epsilonValueLabel.setMinimumWidth(50)
+
+        epsilonLayout.addWidget(self._epsilonSlider)
+        epsilonLayout.addWidget(self._epsilonValueLabel)
+
+        epsilonWidget = QtWidgets.QWidget()
+        epsilonWidget.setLayout(epsilonLayout)
+        selectAiModel.defaultWidget().layout().addWidget(epsilonWidget)
+
+        # Connect slider to update label
+        self._epsilonSlider.valueChanged.connect(
+            lambda value: self._epsilonValueLabel.setText(f"{value/1000:.3f}")
+        )
 
         self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
             on_submit=self._submit_ai_prompt, parent=self
@@ -1466,8 +1480,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Find the largest contour by area
         max_contour = max(contours, key=cv2.contourArea)
 
-        # Get epsilon_factor from spinbox
-        epsilon_factor: float = self._epsilonSpinBox.value()
+        # Get epsilon_factor from slider (value/1000 converts slider range 1-100 to 0.001-0.1)
+        epsilon_factor: float = self._epsilonSlider.value() / 1000.0
         epsilon = epsilon_factor * cv2.arcLength(max_contour, True)
         approx = cv2.approxPolyDP(max_contour, epsilon, True)
 
@@ -1479,6 +1493,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return [polygon]
 
         return []
+
 
     ###################################################################################################################
     def resetState(self):
@@ -2635,4 +2650,5 @@ def _scan_image_files(root_dir: str) -> list[str]:
 
     logger.debug("found {:d} images in {!r}", len(images), root_dir)
     return natsort.os_sorted(images)
+
 
