@@ -77,7 +77,7 @@ This fork replaces the osam dependency with the **official segment-anything** im
 ### Step 1: Install Labelme-SAM
 ```bash
 # Install from GitHub
-pip install git+https://github.com/YOUR_USERNAME/labelme-sam.git
+pip install git+https://github.com/YOUR_USERNAME/local-labelme-sam.git
 ```
 
 ### Step 2: Install Official SAM
