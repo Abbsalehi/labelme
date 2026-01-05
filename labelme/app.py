@@ -48,9 +48,12 @@ from . import utils
 from pathlib import Path
 import torch 
 import urllib.request
-
+import requests
 import threading
 from segment_anything import sam_model_registry, SamPredictor
+from typing import Optional
+import hashlib
+
 
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
@@ -75,117 +78,170 @@ class _ZoomMode(enum.Enum):
 
 
 ##############################################################################
-def download_sam_checkpoint(model_type: str = "vit_h", cache_dir: str | None = None) -> str:
+# SAM Model Configurations
+SAM_MODELS = {
+    "vit_h": {
+        "name": "SAM ViT-H (High Accuracy)",
+        "checkpoint": "sam_vit_h_4b8939.pth",
+        "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
+        "model_type": "vit_h"
+    },
+    "vit_l": {
+        "name": "SAM ViT-L (Balanced)",
+        "checkpoint": "sam_vit_l_0b3195.pth",
+        "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
+        "model_type": "vit_l"
+    },
+    "vit_b": {
+        "name": "SAM ViT-B (Fast)",
+        "checkpoint": "sam_vit_b_01ec64.pth",
+        "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
+        "model_type": "vit_b"
+    }
+}
+
+
+def get_sam_checkpoint_dir() -> Path:
+    """Get the directory for storing SAM checkpoints."""
+    checkpoint_dir = Path.home() / ".cache" / "labelme" / "sam_checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoint_dir
+
+
+def download_sam_checkpoint(model_key: str, parent=None) -> Optional[str]:
     """
-    Download SAM checkpoint automatically if not present.
+    Download SAM checkpoint if not already present.
 
     Args:
-        model_type: One of "vit_h", "vit_l", "vit_b"
-        cache_dir: Directory to save checkpoint. If None, uses ~/.cache/sam
+        model_key: One of 'vit_h', 'vit_l', 'vit_b'
+        parent: Parent widget for progress dialog
 
     Returns:
-        Path to the downloaded checkpoint
+        Path to checkpoint file or None if download failed
     """
+    if model_key not in SAM_MODELS:
+        logger.error(f"Invalid model key: {model_key}")
+        return None
 
+    model_info = SAM_MODELS[model_key]
+    checkpoint_dir = get_sam_checkpoint_dir()
+    checkpoint_path = checkpoint_dir / model_info["checkpoint"]
 
-    # SAM checkpoint URLs from official repository
-    SAM_URLS = {
-        "vit_h": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
-        "vit_l": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
-        "vit_b": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
-    }
+    # Check if checkpoint already exists
+    if checkpoint_path.exists():
+        logger.info(f"SAM checkpoint already exists: {checkpoint_path}")
+        return str(checkpoint_path)
 
-    SAM_FILENAMES = {
-        "vit_h": "sam_vit_h_4b8939.pth",
-        "vit_l": "sam_vit_l_0b3195.pth",
-        "vit_b": "sam_vit_b_01ec64.pth",
-    }
+    # Show download dialog
+    from PyQt5.QtWidgets import QProgressDialog
+    from PyQt5.QtCore import Qt
 
-    if model_type not in SAM_URLS:
-        raise ValueError(f"Invalid model_type: {model_type}. Must be one of {list(SAM_URLS.keys())}")
-
-    # Set cache directory
-    if cache_dir is None:
-        cache_dir = str(Path.home() / ".cache" / "sam")
-
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-
-    checkpoint_path = str(Path(cache_dir) / SAM_FILENAMES[model_type])
-
-    # Check if already downloaded
-    if Path(checkpoint_path).exists():
-        logger.info(f"SAM checkpoint already exists at {checkpoint_path}")
-        return checkpoint_path
-
-    # Download with progress
-    url = SAM_URLS[model_type]
-    logger.info(f"Downloading SAM checkpoint from {url}...")
+    progress_dialog = QProgressDialog(
+        f"Downloading {model_info['name']}...\nThis may take several minutes.",
+        "Cancel",
+        0,
+        100,
+        parent
+    )
+    progress_dialog.setWindowTitle("Downloading SAM Model")
+    progress_dialog.setWindowModality(Qt.WindowModal)
+    progress_dialog.setMinimumDuration(0)
+    progress_dialog.setValue(0)
 
     try:
-        # Download to temporary file first
-        temp_path = checkpoint_path + ".tmp"
+        logger.info(f"Downloading SAM checkpoint from {model_info['url']}")
 
-        def report_progress(block_num, block_size, total_size):
-            downloaded = block_num * block_size
-            percent = min(downloaded * 100.0 / total_size, 100.0)
-            if block_num % 100 == 0:  # Log every 100 blocks
-                logger.info(f"Download progress: {percent:.1f}%")
+        # Download with progress
+        response = requests.get(model_info["url"], stream=True)
+        response.raise_for_status()
 
-        urllib.request.urlretrieve(url, temp_path, reporthook=report_progress)
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 8192
+        downloaded = 0
 
-        # Move to final location
-        Path(temp_path).rename(checkpoint_path)
-        logger.info(f"SAM checkpoint downloaded successfully to {checkpoint_path}")
+        with open(checkpoint_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=block_size):
+                if progress_dialog.wasCanceled():
+                    checkpoint_path.unlink(missing_ok=True)
+                    logger.info("Download canceled by user")
+                    return None
 
-        return checkpoint_path
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_size > 0:
+                        progress = int((downloaded / total_size) * 100)
+                        progress_dialog.setValue(progress)
+                        progress_dialog.setLabelText(
+                            f"Downloading {model_info['name']}...\n"
+                            f"{downloaded / (1024 * 1024):.1f} MB / {total_size / (1024 * 1024):.1f} MB"
+                        )
+
+        progress_dialog.setValue(100)
+        logger.info(f"Successfully downloaded SAM checkpoint to {checkpoint_path}")
+        return str(checkpoint_path)
 
     except Exception as e:
-        # Clean up temporary file if it exists
-        if Path(temp_path).exists():
-            Path(temp_path).unlink()
-        raise RuntimeError(f"Failed to download SAM checkpoint: {e}")
+        logger.error(f"Failed to download SAM checkpoint: {e}")
+        checkpoint_path.unlink(missing_ok=True)
+
+        if parent:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                parent,
+                "Download Failed",
+                f"Failed to download SAM model:\n{str(e)}\n\n"
+                f"Please check your internet connection and try again."
+            )
+
+        return None
+    finally:
+        progress_dialog.close()
 
 
-class SAMDownloadDialog(QtWidgets.QDialog):
-    """Dialog to show SAM model download progress."""
+def load_sam_model(model_key: str, device: str = "cuda") -> Optional[SamPredictor]:
+    """
+    Load SAM model with the specified variant.
 
-    def __init__(self, model_type: str, parent=None):
-        super().__init__(parent)
-        self.model_type = model_type
-        self.setWindowTitle(f"Downloading SAM Model ({model_type})")
-        self.setModal(True)
-        self.setMinimumWidth(400)
+    Args:
+        model_key: One of 'vit_h', 'vit_l', 'vit_b'
+        device: 'cuda' or 'cpu'
 
-        layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel(f"Downloading SAM {model_type} checkpoint...")
-        layout.addWidget(self.label)
+    Returns:
+        SamPredictor instance or None if loading failed
+    """
+    if model_key not in SAM_MODELS:
+        logger.error(f"Invalid model key: {model_key}")
+        return None
 
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        layout.addWidget(self.progress_bar)
+    model_info = SAM_MODELS[model_key]
+    checkpoint_dir = get_sam_checkpoint_dir()
+    checkpoint_path = checkpoint_dir / model_info["checkpoint"]
 
-        self.status_label = QtWidgets.QLabel("")
-        layout.addWidget(self.status_label)
-        self.setLayout(layout)
+    if not checkpoint_path.exists():
+        logger.error(f"Checkpoint not found: {checkpoint_path}")
+        return None
 
-        self.checkpoint_path = None
-        self.error = None
+    try:
 
-    def download_in_thread(self, cache_dir: str | None = None):
-        """Start download in a separate thread."""
+        logger.info(f"Loading SAM model: {model_key} from {checkpoint_path}")
+        sam = sam_model_registry[model_info["model_type"]](checkpoint=str(checkpoint_path))
 
-        def download():
-            try:
-                # Simply call the download_sam_checkpoint function
-                checkpoint_path = download_sam_checkpoint(self.model_type, cache_dir)
-                self.checkpoint_path = checkpoint_path
-                QtCore.QTimer.singleShot(0, self.accept)
-            except Exception as e:
-                self.error = str(e)
-                QtCore.QTimer.singleShot(0, self.reject)
+        # Use CUDA if available
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available, using CPU")
+            device = "cpu"
 
-        thread = threading.Thread(target=download, daemon=True)
-        thread.start()
+        sam.to(device=device)
+        predictor = SamPredictor(sam)
+
+        logger.info(f"Successfully loaded SAM model on {device}")
+        return predictor
+
+    except Exception as e:
+        logger.error(f"Failed to load SAM model: {e}")
+        return None
 
 
 ##############################################################################
@@ -247,8 +303,20 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(__appname__)
 
-        self._copied_shapes = []
+        # Set application-wide font
+        app_font = QtGui.QFont()
+        app_font.setFamily("Segoe UI")  # Choose your font
+        app_font.setPointSize(9)  # Change size
+        self.setFont(app_font)
 
+        self._copied_shapes = []
+        ######################################
+        # ADD THESE THREE LINES HERE
+        # SAM Model state
+        self.sam_predictor: Optional[SamPredictor] = None
+        self.current_sam_model: str = "vit_h"  # Default model
+        self.sam_device: str = "cuda" if torch.cuda.is_available() else "cpu"
+        ######################################
         # Main widgets and related state.
         self.labelDialog = LabelDialog(
             parent=self,
@@ -512,22 +580,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing linestrip. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
-        createAiPolygonMode = action(
-            self.tr("Create AI-Polygon"),
-            lambda: self._switch_canvas_mode(edit=False, createMode="ai_polygon"),
-            None,
-            "ai-polygon.svg",
-            self.tr("Start drawing ai_polygon. Ctrl+LeftClick ends creation."),
-            enabled=False,
-        )
-        createAiMaskMode = action(
-            self.tr("Create AI-Mask"),
-            lambda: self._switch_canvas_mode(edit=False, createMode="ai_mask"),
-            None,
-            "ai-mask.svg",
-            self.tr("Start drawing ai_mask. Ctrl+LeftClick ends creation."),
-            enabled=False,
-        )
+        # createAiPolygonMode = action(
+        #     self.tr("Create AI-Polygon"),
+        #     lambda: self._switch_canvas_mode(edit=False, createMode="ai_polygon"),
+        #     None,
+        #     "ai-polygon.svg",
+        #     self.tr("Start drawing ai_polygon. Ctrl+LeftClick ends creation."),
+        #     enabled=False,
+        # )
+        # createAiMaskMode = action(
+        #     self.tr("Create AI-Mask"),
+        #     lambda: self._switch_canvas_mode(edit=False, createMode="ai_mask"),
+        #     None,
+        #     "ai-mask.svg",
+        #     self.tr("Start drawing ai_mask. Ctrl+LeftClick ends creation."),
+        #     enabled=False,
+        # )
         editMode = action(
             self.tr("Edit Polygons"),
             lambda: self._switch_canvas_mode(edit=True),
@@ -800,8 +868,8 @@ class MainWindow(QtWidgets.QMainWindow):
             createLineMode=createLineMode,
             createPointMode=createPointMode,
             createLineStripMode=createLineStripMode,
-            createAiPolygonMode=createAiPolygonMode,
-            createAiMaskMode=createAiMaskMode,
+            # createAiPolygonMode=createAiPolygonMode,
+            # createAiMaskMode=createAiMaskMode,
             zoom=zoom,
             zoomIn=zoomIn,
             zoomOut=zoomOut,
@@ -822,8 +890,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("point", createPointMode),
             ("line", createLineMode),
             ("linestrip", createLineStripMode),
-            ("ai_polygon", createAiPolygonMode),
-            ("ai_mask", createAiMaskMode),
+            # ("ai_polygon", createAiPolygonMode),
+            # ("ai_mask", createAiMaskMode),
         ]
 
         # Group zoom controls into a list for easier toggling.
@@ -843,8 +911,8 @@ class MainWindow(QtWidgets.QMainWindow):
             createLineMode,
             createPointMode,
             createLineStripMode,
-            createAiPolygonMode,
-            createAiMaskMode,
+            # createAiPolygonMode,
+            # createAiMaskMode,
             brightnessContrast,
         )
         # menu shown at right click
@@ -946,119 +1014,54 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         )
 
+        #####################################################################################
         selectAiModel = QtWidgets.QWidgetAction(self)
         selectAiModel.setDefaultWidget(QtWidgets.QWidget())
         selectAiModel.defaultWidget().setLayout(QtWidgets.QVBoxLayout())
-        #
-        selectAiModelLabel = QtWidgets.QLabel(self.tr("AI Mask Model"))
+
+        # SAM Model Selection Label
+        selectAiModelLabel = QtWidgets.QLabel(self.tr("SAM Model"))
         selectAiModelLabel.setAlignment(QtCore.Qt.AlignCenter)
         selectAiModel.defaultWidget().layout().addWidget(selectAiModelLabel)
-        #
+
+        # SAM Model ComboBox
         self._selectAiModelComboBox = QtWidgets.QComboBox()
+        self._selectAiModelComboBox.setMaximumWidth(200)
+        for model_key, model_info in SAM_MODELS.items():
+            self._selectAiModelComboBox.addItem(model_info["name"], userData=model_key)
+
+        default_index = 0  # vit_h by default
+
         selectAiModel.defaultWidget().layout().addWidget(self._selectAiModelComboBox)
-        MODEL_NAMES: list[tuple[str, str]] = [
-            ("efficientsam:10m", "EfficientSam (speed)"),
-            ("efficientsam:latest", "EfficientSam (accuracy)"),
-            ("sam:100m", "Sam (speed)"),
-            ("sam:300m", "Sam (balanced)"),
-            ("sam:latest", "Sam (accuracy)"),
-            ("sam2:small", "Sam2 (speed)"),
-            ("sam2:latest", "Sam2 (balanced)"),
-            ("sam2:large", "Sam2 (accuracy)"),
-        ]
-        for model_name, model_ui_name in MODEL_NAMES:
-            self._selectAiModelComboBox.addItem(model_ui_name, userData=model_name)
-        model_ui_names: list[str] = [model_ui_name for _, model_ui_name in MODEL_NAMES]
-        if self._config["ai"]["default"] in model_ui_names:
-            model_index = model_ui_names.index(self._config["ai"]["default"])
+
+        # Device Selection
+        deviceLabel = QtWidgets.QLabel(self.tr("Device"))
+        deviceLabel.setAlignment(QtCore.Qt.AlignCenter)
+        selectAiModel.defaultWidget().layout().addWidget(deviceLabel)
+
+        self._deviceComboBox = QtWidgets.QComboBox()
+        self._deviceComboBox.setMaximumWidth(200)
+        self._deviceComboBox.addItem("CUDA (GPU)", userData="cuda")
+        self._deviceComboBox.addItem("CPU", userData="cpu")
+
+        # Set default device
+        if torch.cuda.is_available():
+            self._deviceComboBox.setCurrentIndex(0)
         else:
-            logger.warning(
-                "Default AI model is not found: %r",
-                self._config["ai"]["default"],
-            )
-            model_index = 0
+            self._deviceComboBox.setCurrentIndex(1)
+            self._deviceComboBox.setEnabled(False)
 
-        #############################################################################
-        self._selectAiModelComboBox.currentIndexChanged.connect(
-            lambda index: self.canvas.set_ai_model_name(
-                model_name=self._selectAiModelComboBox.itemData(index)
-            )
-        )
-        self._selectAiModelComboBox.setCurrentIndex(model_index)
-        # Initialize SAM predictor
-        SAM_MODEL_TYPE = "vit_h"  # Options: "vit_h" (best), "vit_l" (medium), "vit_b" (fast)
-        SAM_CACHE_DIR = None  # None = use default (~/.cache/sam), or specify custom path
+        selectAiModel.defaultWidget().layout().addWidget(self._deviceComboBox)
 
-        self.sam_predictor = None
+        self._deviceComboBox.currentIndexChanged.connect(self._on_device_changed)
 
-        try:
-            # Determine checkpoint path
-            if SAM_CACHE_DIR is None:
-                cache_dir = str(Path.home() / ".cache" / "sam")
-            else:
-                cache_dir = SAM_CACHE_DIR
-
-            SAM_FILENAMES = {
-                "vit_h": "sam_vit_h_4b8939.pth",
-                "vit_l": "sam_vit_l_0b3195.pth",
-                "vit_b": "sam_vit_b_01ec64.pth",
-            }
-
-            checkpoint_path = str(Path(cache_dir) / SAM_FILENAMES[SAM_MODEL_TYPE])
-
-            # Check if checkpoint exists, if not download it
-            if not Path(checkpoint_path).exists():
-                logger.info(f"SAM checkpoint not found, downloading {SAM_MODEL_TYPE}...")
-
-                # Show download dialog
-                download_dialog = SAMDownloadDialog(SAM_MODEL_TYPE, parent=self)
-                download_dialog.download_in_thread(cache_dir)
-
-                if download_dialog.exec_() == QtWidgets.QDialog.Accepted:
-                    checkpoint_path = download_dialog.checkpoint_path
-                    logger.info(f"SAM checkpoint downloaded to {checkpoint_path}")
-                else:
-                    error_msg = download_dialog.error or "Download cancelled"
-                    logger.error(f"Failed to download SAM checkpoint: {error_msg}")
-                    QtWidgets.QMessageBox.warning(
-                        self,
-                        "SAM Download Failed",
-                        f"Failed to download SAM checkpoint:\n{error_msg}\n\n"
-                        f"You can manually download from:\n"
-                        f"https://github.com/facebookresearch/segment-anything#model-checkpoints\n"
-                        f"and place it in: {cache_dir}"
-                    )
-                    checkpoint_path = None
-
-            # Load SAM model
-            if checkpoint_path and Path(checkpoint_path).exists():
-                logger.info(f"Loading SAM model from {checkpoint_path}...")
-                sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=checkpoint_path)
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                sam.to(device=device)
-
-                self.sam_predictor = SamPredictor(sam)
-                logger.info(f"SAM model loaded successfully on {device}")
-            else:
-                logger.warning("SAM model not available")
-
-        except Exception as e:
-            logger.error(f"Failed to initialize SAM model: {e}")
-            self.sam_predictor = None
-            QtWidgets.QMessageBox.warning(
-                self,
-                "SAM Initialization Failed",
-                f"Failed to initialize SAM model:\n{str(e)}\n\n"
-                f"Segmentation features will be disabled."
-            )
-
-        # Add output mode selection
+        # Output Mode selection
         outputModeLabel = QtWidgets.QLabel(self.tr("Output Mode"))
         outputModeLabel.setAlignment(QtCore.Qt.AlignCenter)
         selectAiModel.defaultWidget().layout().addWidget(outputModeLabel)
-
+#####################################################################################
         self._outputModeComboBox = QtWidgets.QComboBox()
+        self._outputModeComboBox.setMaximumWidth(200)
         self._outputModeComboBox.addItem("Bounding Box", "bbox")
         self._outputModeComboBox.addItem("Segmentation", "segmentation")
         self._outputModeComboBox.addItem("Both", "both")
@@ -1074,6 +1077,7 @@ class MainWindow(QtWidgets.QMainWindow):
         epsilonLayout = QtWidgets.QHBoxLayout()
 
         self._epsilonSlider = QtWidgets.QSlider(Qt.Horizontal)
+        self._epsilonSlider.setMaximumWidth(150)
         self._epsilonSlider.setMinimum(1)  # 0.001
         self._epsilonSlider.setMaximum(100)  # 0.1
         self._epsilonSlider.setValue(10)  # 0.01 default
@@ -1081,7 +1085,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._epsilonSlider.setTickInterval(10)
 
         self._epsilonValueLabel = QtWidgets.QLabel("0.010")
-        self._epsilonValueLabel.setMinimumWidth(50)
+        self._epsilonValueLabel.setMinimumWidth(40)
+        self._epsilonValueLabel.setMaximumWidth(40)
 
         epsilonLayout.addWidget(self._epsilonSlider)
         epsilonLayout.addWidget(self._epsilonValueLabel)
@@ -1094,6 +1099,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._epsilonSlider.valueChanged.connect(
             lambda value: self._epsilonValueLabel.setText(f"{value / 1000:.3f}")
         )
+        selectAiModel.defaultWidget().setMaximumWidth(220)
 
         self._ai_prompt_widget: AiPromptWidget = AiPromptWidget(
             on_submit=self._submit_ai_prompt, parent=self
@@ -1102,6 +1108,11 @@ class MainWindow(QtWidgets.QMainWindow):
         #############################################################################
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_prompt_widget)
+        # Create custom font
+        toolbar_font = QtGui.QFont()
+        toolbar_font.setFamily("Segoe UI")  # or "Segoe UI", "Helvetica", "Calibri", etc.
+        toolbar_font.setPointSize(9)  # Change size (default is usually 10-11)
+        # toolbar_font.setBold(True)  # Optional: make bold
 
         self.addToolBar(
             Qt.TopToolBarArea,
@@ -1128,7 +1139,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     None,
                     ai_prompt_action,
                 ],
-                font_base=self.font(),
+                # font_base=self.font(),
+                font_base=toolbar_font,
             ),
         )
         self.addToolBar(
@@ -1138,7 +1150,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 actions=[a for _, a in self.draw_actions],
                 orientation=Qt.Vertical,
                 button_style=Qt.ToolButtonTextUnderIcon,
-                font_base=self.font(),
+                # font_base=self.font(),
+                font_base=toolbar_font,
             ),
         )
 
@@ -1181,7 +1194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Restore application settings.
         self.settings = QtCore.QSettings("labelme", "labelme")
         self.recentFiles = self.settings.value("recentFiles", []) or []
-        size = self.settings.value("window/size", QtCore.QSize(900, 500))
+        size = self.settings.value("window/size", QtCore.QSize(200, 200))
         position = self.settings.value("window/position", QtCore.QPoint(0, 0))
         state = self.settings.value("window/state", QtCore.QByteArray())
         self.resize(size)
@@ -1206,6 +1219,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoomWidget.valueChanged.connect(self._paint_canvas)
 
         self.populateModeActions()
+        self._selectAiModelComboBox.currentIndexChanged.connect(self._on_sam_model_changed)
+        self._deviceComboBox.currentIndexChanged.connect(self._on_device_changed)
+
+        # Set initial index (this will now trigger the signal and load the model)
+        self._selectAiModelComboBox.setCurrentIndex(0)  # vit_h
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -1289,7 +1307,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         model_name: str = "yoloworld"
         model_type = osam.apis.get_model_type_by_name(model_name)
-        model_type = typing.cast(type[osam.types.Model], model_type)
         if not (_is_already_downloaded := model_type.get_size() is not None):
             if not download_ai_model(model_name=model_name, parent=self):
                 return
@@ -1345,8 +1362,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 texts=texts,
             )
             for shape_dict in shape_dicts:
+
+                # Add suffix to distinguish bbox from segmentation
+                bbox_label = shape_dict["label"] + "_bbox" if output_mode == "both" else shape_dict["label"]
+
                 shape = Shape(
-                    label=shape_dict["label"],
+                    label=bbox_label,
+                    # label=shape_dict["label"],
                     shape_type=shape_dict["shape_type"],
                     description=shape_dict["description"],
                 )
@@ -1362,12 +1384,131 @@ class MainWindow(QtWidgets.QMainWindow):
                 scores=scores,
                 labels=labels,
                 texts=texts,
+                add_suffix=(output_mode == "both"),
             )
             shapes.extend(seg_shapes)
 
         self.canvas.storeShapes()
         self._load_shapes(shapes, replace=False)
         self.setDirty()
+
+   #######################################################################
+    # ADD THESE THREE NEW METHODS HERE
+    def _on_sam_model_changed(self, index: int) -> None:
+        """Handle SAM model selection change."""
+        model_key = self._selectAiModelComboBox.itemData(index)
+        if model_key == self.current_sam_model:
+            return
+
+        logger.info(f"Switching SAM model to: {model_key}")
+
+        # Check if checkpoint exists, download if not
+        checkpoint_dir = get_sam_checkpoint_dir()
+        model_info = SAM_MODELS[model_key]
+        checkpoint_path = checkpoint_dir / model_info["checkpoint"]
+
+        if not checkpoint_path.exists():
+            logger.info(f"Checkpoint not found, downloading: {model_key}")
+            downloaded_path = download_sam_checkpoint(model_key, parent=self)
+            if downloaded_path is None:
+                # Download failed or canceled, revert to previous model
+                logger.warning("Download failed, reverting to previous model")
+                for i in range(self._selectAiModelComboBox.count()):
+                    if self._selectAiModelComboBox.itemData(i) == self.current_sam_model:
+                        self._selectAiModelComboBox.blockSignals(True)
+                        self._selectAiModelComboBox.setCurrentIndex(i)
+                        self._selectAiModelComboBox.blockSignals(False)
+                        break
+                return
+
+        # Load the new model
+        self.sam_predictor = load_sam_model(model_key, device=self.sam_device)
+
+        if self.sam_predictor is None:
+            logger.error(f"Failed to load SAM model: {model_key}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Model Load Failed",
+                f"Failed to load SAM model: {model_info['name']}\n"
+                f"Please try again or select a different model."
+            )
+            # Revert to previous model
+            for i in range(self._selectAiModelComboBox.count()):
+                if self._selectAiModelComboBox.itemData(i) == self.current_sam_model:
+                    self._selectAiModelComboBox.blockSignals(True)
+                    self._selectAiModelComboBox.setCurrentIndex(i)
+                    self._selectAiModelComboBox.blockSignals(False)
+                    break
+            return
+
+        self.current_sam_model = model_key
+        logger.info(f"Successfully switched to SAM model: {model_key}")
+        self.show_status_message(f"Loaded {model_info['name']}")
+
+    def _on_device_changed(self, index: int) -> None:
+        """Handle device selection change."""
+        device = self._deviceComboBox.itemData(index)
+        if device == self.sam_device:
+            return
+
+        logger.info(f"Switching device to: {device}")
+
+        if device == "cuda" and not torch.cuda.is_available():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "CUDA Not Available",
+                "CUDA is not available on this system. Using CPU instead."
+            )
+            self._deviceComboBox.blockSignals(True)
+            self._deviceComboBox.setCurrentIndex(1)
+            self._deviceComboBox.blockSignals(False)
+            return
+
+        self.sam_device = device
+
+        # Reload the current model on the new device
+        if self.sam_predictor is not None:
+            self.sam_predictor = load_sam_model(self.current_sam_model, device=self.sam_device)
+            if self.sam_predictor is None:
+                logger.error(f"Failed to reload SAM model on {device}")
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Device Switch Failed",
+                    f"Failed to switch to {device}. Please try again."
+                )
+            else:
+                logger.info(f"Successfully switched to {device}")
+                self.show_status_message(f"Switched to {device.upper()}")
+
+    def _ensure_sam_model_loaded(self) -> bool:
+        """Ensure SAM model is loaded, load if necessary."""
+        if self.sam_predictor is not None:
+            return True
+
+        logger.info("SAM model not loaded, loading default model")
+
+        # Check if checkpoint exists, download if not
+        checkpoint_dir = get_sam_checkpoint_dir()
+        model_info = SAM_MODELS[self.current_sam_model]
+        checkpoint_path = checkpoint_dir / model_info["checkpoint"]
+
+        if not checkpoint_path.exists():
+            logger.info(f"Checkpoint not found, downloading: {self.current_sam_model}")
+            downloaded_path = download_sam_checkpoint(self.current_sam_model, parent=self)
+            if downloaded_path is None:
+                return False
+
+        # Load the model
+        self.sam_predictor = load_sam_model(self.current_sam_model, device=self.sam_device)
+
+        if self.sam_predictor is None:
+            logger.error(f"Failed to load SAM model: {self.current_sam_model}")
+            return False
+
+        logger.info(f"Successfully loaded SAM model: {self.current_sam_model}")
+        return True
+
+    #######################################################################
 
     def _get_segmentation_from_boxes(
             self,
@@ -1376,24 +1517,112 @@ class MainWindow(QtWidgets.QMainWindow):
             scores: np.ndarray,
             labels: np.ndarray,
             texts: list[str],
+            add_suffix: bool = False,
     ) -> list[Shape]:
-        """Generate segmentation masks for detected bounding boxes using SAM with refinement."""
+        """Generate segmentation masks for detected bounding boxes using SAM."""
 
-        if self.sam_predictor is None:
-            logger.warning("SAM predictor not initialized")
+        # Ensure model is loaded
+        if not self._ensure_sam_model_loaded():
+            logger.warning("SAM model could not be loaded")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "SAM Not Available",
+                "SAM model could not be loaded. Please check your internet connection and try again."
+            )
             return []
 
         shapes: list[Shape] = []
 
-    def _generate_mask_with_osam(
+        # Process each bounding box
+        for box, score, label_idx in zip(boxes, scores, labels):
+            label = texts[int(label_idx)]
+
+            # Add suffix to distinguish segmentation from bbox
+            if add_suffix:
+                label = label + "_seg"
+
+            try:
+                # Convert box from [x1, y1, x2, y2] to [x, y, w, h] format
+                x_min, y_min, x_max, y_max = box
+                bbx = [x_min, y_min, x_max - x_min, y_max - y_min]
+
+                # Extend bounding box for better context (1.05x on longer side)
+                extended_bbx = self._extend_bbx(bbx, extension_factor=1.2, extend_by_long_side=True)
+
+                # Convert extended box to [x1, y1, x2, y2] format for SAM
+                x, y, w, h = extended_bbx
+                input_box = [
+                    max(0, int(x)),
+                    max(0, int(y)),
+                    min(image.shape[1], int(x + w)),
+                    min(image.shape[0], int(y + h))
+                ]
+
+                # First pass: Generate mask with extended box
+                mask = self._generate_mask_with_sam(
+                    sam_model_name="",  # Not used anymore
+                    image=image,
+                    box=input_box,
+                )
+
+                if mask is None:
+                    logger.warning(f"No mask generated for label '{label}'")
+                    continue
+
+                # Optional: Refine mask by getting tighter bounding box from initial mask
+                refined_bbx = self._bbx_from_mask(mask, extend=15)
+                if refined_bbx is not None:
+                    x, y, w, h = refined_bbx
+                    refined_box = [int(x), int(y), int(x + w), int(y + h)]
+
+                    refined_mask = self._generate_mask_with_sam(
+                        sam_model_name="",
+                        image=image,
+                        box=refined_box,
+                    )
+                    if refined_mask is not None:
+                        mask = refined_mask
+
+                # Convert mask to uint8 for contour detection
+                mask_uint8 = mask.astype(np.uint8)
+
+                # Convert mask to polygon contours
+                contours = self._mask_to_polygons(mask_uint8)
+
+                # Create shape for each contour
+                for contour in contours:
+                    if len(contour) < 3:
+                        continue
+
+                    shape = Shape(
+                        label=label,
+                        shape_type="polygon",
+                        description=f"score: {score:.2f}",
+                    )
+
+                    for point in contour:
+                        shape.addPoint(QtCore.QPointF(float(point[0]), float(point[1])))
+
+                    shape.close()
+                    shapes.append(shape)
+
+            except Exception as e:
+                logger.warning(f"Failed to generate segmentation for label '{label}': {e}")
+                continue
+
+        return shapes
+
+    def _generate_mask_with_sam(
             self,
-            sam_model_name: str,  # Keep parameter for compatibility but ignore it
+            sam_model_name: str,  # Keep for compatibility but ignore
             image: np.ndarray,
             box: list[int]
     ) -> np.ndarray | None:
         """Generate a single mask using official SAM."""
-        if self.sam_predictor is None:
-            logger.warning("SAM predictor not initialized")
+
+        # Ensure model is loaded
+        if not self._ensure_sam_model_loaded():
+            logger.warning("SAM model could not be loaded")
             return None
 
         try:
@@ -1505,41 +1734,6 @@ class MainWindow(QtWidgets.QMainWindow):
         height = y_max - y_min + 1
 
         return [x_min, y_min, width, height]
-
-    # def _mask_to_polygons(
-    #         self,
-    #         mask: np.ndarray
-    # ) -> list[np.ndarray]:
-    #     """Convert binary mask to polygon contours (only largest contour)."""
-
-    #     # Find contours
-    #     contours, _ = cv2.findContours(
-    #         mask.astype(np.uint8),
-    #         cv2.RETR_EXTERNAL,
-    #         cv2.CHAIN_APPROX_SIMPLE
-    #     )
-
-    #     if not contours:
-    #         return []
-
-    #     # Find the largest contour by area
-    #     max_contour = max(contours, key=cv2.contourArea)
-
-    #     # # Simplify contour
-    #     epsilon_factor: float = 0.001
-    #     epsilon = epsilon_factor * cv2.arcLength(max_contour, True)
-    #     approx = cv2.approxPolyDP(max_contour, epsilon, True)
-
-    #     # # Reshape to (N, 2)
-    #     polygon = approx.reshape(-1, 2)
-    #     # Reshape to (N, 2)
-    #     # polygon = max_contour.reshape(-1, 2)
-
-    #     # Only return if polygon has at least 3 points
-    #     if len(polygon) >= 3:
-    #         return [polygon]
-
-    #     return []
 
     def _mask_to_polygons(
             self,
